@@ -7,10 +7,13 @@ import argparse
 import math
 import cv2
 import torch
+import torch.nn.functional as F
 import os
 import numpy as np
 import json
 from tqdm import tqdm
+from typing import Dict, List, Tuple
+
 
 # Gaussian splatting dependencies
 from utils.sh_utils import eval_sh
@@ -42,6 +45,60 @@ from utils.decode_param import *
 from utils.transformation_utils import *
 from utils.camera_view_utils import *
 from utils.render_utils import *
+
+
+import nvdiffrast.torch as dr
+def read_hdr(path: str) -> np.ndarray:
+    """Reads an HDR map from disk.
+
+    Args:
+        path (str): Path to the .hdr file.
+
+    Returns:
+        numpy.ndarray: Loaded (float) HDR map with RGB channels in order.
+    """
+    with open(path, "rb") as h:
+        buffer_ = np.frombuffer(h.read(), np.uint8)
+    bgr = cv2.imdecode(buffer_, cv2.IMREAD_UNCHANGED)
+    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    return rgb
+
+def cube_to_dir(s: int, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    if s == 0:
+        rx, ry, rz = torch.ones_like(x), -y, -x
+    elif s == 1:
+        rx, ry, rz = -torch.ones_like(x), -y, x
+    elif s == 2:
+        rx, ry, rz = x, torch.ones_like(x), y
+    elif s == 3:
+        rx, ry, rz = x, -torch.ones_like(x), -y
+    elif s == 4:
+        rx, ry, rz = x, -y, torch.ones_like(x)
+    elif s == 5:
+        rx, ry, rz = -x, -y, -torch.ones_like(x)
+    return torch.stack((rx, ry, rz), dim=-1)
+
+def latlong_to_cubemap(latlong_map: torch.Tensor, res: List[int]) -> torch.Tensor:
+    cubemap = torch.zeros(
+        6, res[0], res[1], latlong_map.shape[-1], dtype=torch.float32, device="cuda"
+    )
+    for s in range(6):
+        gy, gx = torch.meshgrid(
+            torch.linspace(-1.0 + 1.0 / res[0], 1.0 - 1.0 / res[0], res[0], device="cuda"),
+            torch.linspace(-1.0 + 1.0 / res[1], 1.0 - 1.0 / res[1], res[1], device="cuda"),
+            indexing="ij",
+        )
+        v = F.normalize(cube_to_dir(s, gx, gy), p=2, dim=-1)
+
+        tu = torch.atan2(v[..., 0:1], -v[..., 2:3]) / (2 * np.pi) + 0.5
+        tv = torch.acos(torch.clamp(v[..., 1:2], min=-1, max=1)) / np.pi
+        texcoord = torch.cat((tu, tv), dim=-1)
+
+        cubemap[s, ...] = dr.texture(
+            latlong_map[None, ...], texcoord[None, ...], filter_mode="linear"
+        )[0]
+    return cubemap.permute(0, 3, 1, 2)
+
 
 wp.init()
 wp.config.verify_cuda = True
@@ -138,7 +195,11 @@ if __name__ == "__main__":
     parser.add_argument("--compile_video", action="store_true")
     parser.add_argument("--white_bg", action="store_true")
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--relight", action="store_true")
+    parser.add_argument("--hdri_path", type=str, default=None)
     args = parser.parse_args()
+
+
 
     if not os.path.exists(args.model_path):
         AssertionError("Model path does not exist!")
@@ -146,6 +207,20 @@ if __name__ == "__main__":
         AssertionError("Scene config does not exist!")
     if args.output_path is not None and not os.path.exists(args.output_path):
         os.makedirs(args.output_path)
+
+    normap_path = os.path.join(args.output_path, "normals")
+    refl_path = os.path.join(args.output_path, "refl")
+    if not os.path.exists(normap_path):
+        os.makedirs(normap_path)
+    if not os.path.exists(refl_path):
+        os.makedirs(refl_path)
+    base_color_path = os.path.join(args.output_path, "base_color")
+    if not os.path.exists(base_color_path):
+        os.makedirs(base_color_path)
+    final_image_path = os.path.join(args.output_path, "final_image")
+    if not os.path.exists(final_image_path):
+        os.makedirs(final_image_path)  
+    
 
     # load scene config
     print("Loading scene config...")
@@ -172,6 +247,20 @@ if __name__ == "__main__":
     # init the scene
     print("Initializing scene and pre-processing...")
     params = load_params_from_gs(gaussians, pipeline)
+
+
+    # envmap = gaussians.get_envmap
+    # print(repr(envmap))
+    if args.hdri_path is not None and args.relight and not args.debug and args.render_img:
+        with torch.no_grad():
+            hdri_path = args.hdri_path
+            print(f"read hdri from {hdri_path}")
+            hdri = read_hdr(hdri_path)
+            hdri = torch.from_numpy(hdri).cuda()
+            res = 128
+            envmap = gaussians.get_envmap
+            envmap.params["Cubemap_texture"] = latlong_to_cubemap(hdri, [res, res])
+            gaussians.env_map = envmap.cuda()
 
     init_pos = params["pos"]
     init_cov = params["cov3D_precomp"]
@@ -443,31 +532,40 @@ if __name__ == "__main__":
             base_color = out_ts[:3,...] # 3,H,W
             refl_strength = out_ts[6:7,...] #
             normal_map = out_ts[3:6,...] 
+            
+
+            normal_clone = normal_map.clone()
+
 
             normal_map = normal_map.permute(1,2,0)
-            # normal_map = normal_map / (torch.norm(normal_map, dim=-1, keepdim=True)+1e-6)
+            # normal_map = normal_map / (torch.norm(normal_map, dim=-1, keepdim=True)+1e-6) # in my experiments it seems that normalized normal map will cause error, but dont know why for now.
+
+
+
             refl_color = get_refl_color(gaussians.get_envmap, current_camera.HWK, current_camera.R, current_camera.T, normal_map)
             
             final_image = (1-refl_strength) * base_color + refl_strength * refl_color
                             
+            to_save = [base_color, refl_color, normal_clone, final_image]
+            paths = [base_color_path, refl_path, normap_path, final_image_path]
+            names = ["base_color", "refl_color", "normal_map", "final_image"]
 
-            # rendering = normal_map.permute(2,0,1)
-            # rendering = normal_map
-            rendering = final_image
+            for i in range(4):
+                rendering = to_save[i]
+                cv2_img = rendering.permute(1, 2, 0).detach().cpu().numpy()
+                cv2_img = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2RGB)
+                if height is None or width is None:
+                    height = cv2_img.shape[0] // 2 * 2
+                    width = cv2_img.shape[1] // 2 * 2
+                assert args.output_path is not None
+                cv2.imwrite(
+                    os.path.join(paths[i], f"{frame}.png".rjust(8, "0")),
+                    255 * cv2_img,
+                )
 
-            cv2_img = rendering.permute(1, 2, 0).detach().cpu().numpy()
-            cv2_img = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2RGB)
-            if height is None or width is None:
-                height = cv2_img.shape[0] // 2 * 2
-                width = cv2_img.shape[1] // 2 * 2
-            assert args.output_path is not None
-            cv2.imwrite(
-                os.path.join(args.output_path, f"{frame}.png".rjust(8, "0")),
-                255 * cv2_img,
-            )
-
-    if args.render_img and args.compile_video:
+    if args.compile_video and args.render_img:
         fps = int(1.0 / time_params["frame_dt"])
-        os.system(
-            f"ffmpeg -framerate {fps} -i {args.output_path}/%04d.png -c:v libx264 -s {width}x{height} -y -pix_fmt yuv420p {args.output_path}/output.mp4"
-        )
+        for i in range(4):
+            os.system(
+                f"ffmpeg -framerate {fps} -i {paths[i]}/%04d.png -c:v libx264 -s {width}x{height} -y -pix_fmt yuv420p {args.output_path}/{names[i]}.mp4"
+            )
