@@ -2,11 +2,11 @@
     "opacity_threshold": 0.02,
     "rotation_degree": [0.0],
     "rotation_axis": [0],
-    "substep_dt": 1e-4,
+    "substep_dt": 5e-5,
     "frame_dt": 4e-2,
-    "frame_num": 125,
+    "frame_num": 200,
     "nu": 0.4,
-    "E": 2e6,
+    "E": 100,
     "material": "jelly",
     "density": 200,
     "g": [0,0,0],
@@ -14,52 +14,91 @@
     "rpic_damping": 0.0,
     "boundary_conditions": [
         {
-            "type": "cuboid",
-            "point": [
-                1,
-                1,
-                0.5
-            ],
-            "size": [
-                0.5,
-                0.5,
-                0.28
-            ],
-            "velocity": [
-                0,
-                0,
-                0
-            ],
-            "start_time": 0,
-            "end_time": 1e3,
-            "reset": 1
+            "type": "bounding_box"
         },
         {
-            "type": "particle_impulse",
-            "force": [
-                -1.8e-1,
-                0.0,
-                0.0
-            ],
-            "num_dt": 1,
-            "start_time": 0
-        }
-    ],
-    "additional_material_params": [
-        {
+            "type": "enforce_particle_velocity_rotation",
             "point": [
-                1.0,
-                1.0,
-                1.5
+                0.98,
+                1.06,
+                0.61
             ],
-            "size": [
-                1.0,
-                1.0,
-                0.5
+            "normal": [
+                0,
+                0,
+                1
             ],
-            "nu": 0.4,
-            "E": 2e6,
-            "density": 70
+            "half_height_and_radius": [
+                0.15,
+                0.26
+            ],
+            "rotation_scale": 1.9,
+            "translation_scale": 0.0,
+            "start_time": 0.0,
+            "end_time": 1.5
+        },
+        {
+            "type": "enforce_particle_velocity_rotation",
+            "point": [
+                0.98,
+                1.06,
+                0.61
+            ],
+            "normal": [
+                0,
+                0,
+                1
+            ],
+            "half_height_and_radius": [
+                0.15,
+                0.26
+            ],
+            "rotation_scale": 0.0,
+            "translation_scale": 0.0,
+            "start_time": 1.5,
+            "end_time": 3.0
+        },
+        {
+            "type": "enforce_particle_velocity_rotation",
+            "point": [
+                0.98,
+                1.06,
+                0.61
+            ],
+            "normal": [
+                0,
+                0,
+                1
+            ],
+            "half_height_and_radius": [
+                0.15,
+                0.26
+            ],
+            "rotation_scale": -1.9,
+            "translation_scale": 0.0,
+            "start_time": 3.0,
+            "end_time": 4.5
+        },
+        {
+            "type": "enforce_particle_velocity_rotation",
+            "point": [
+                0.98,
+                1.06,
+                0.61
+            ],
+            "normal": [
+                0,
+                0,
+                1
+            ],
+            "half_height_and_radius": [
+                0.15,
+                0.26
+            ],
+            "rotation_scale": 0.0,
+            "translation_scale": 0.0,
+            "start_time": 4.5,
+            "end_time": 100.0
         }
     ],
     "mpm_space_vertical_upward_axis": [0,0,1],
@@ -69,7 +108,7 @@
     "init_azimuthm": -36.7,
     "init_elevation": 8.96,
     "init_radius": 4.11,
-    "move_camera": true,
+    "move_camera": false,
     "delta_a": 0.4,
     "delta_e": 0.0,
     "delta_r": 0.0

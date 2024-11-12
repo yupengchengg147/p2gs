@@ -1066,7 +1066,8 @@ class MPM_Simulator_WARP:
             else:
                 axis = i
                 point[i] = end_position
-
+        # in wolf config:
+        # point = [0.5, 0, 0], axis=0
         half_length_portion = wp.abs(start_position - end_position) / num_layers
         end_time_portion = end_time / num_layers
         for i in range(num_layers):

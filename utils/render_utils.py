@@ -15,18 +15,49 @@ from tqdm import tqdm
 
 # Gaussian splatting dependencies
 from utils.sh_utils import eval_sh
-from scene.gaussian_model import GaussianModel
-from diff_gaussian_rasterization import (
-    GaussianRasterizationSettings,
-    GaussianRasterizer,
-)
+# from scene.gaussian_model import GaussianModel
+from scene.gaussian_model_3dgsdr import GaussianModel
+# from diff_gaussian_rasterization import (
+#     GaussianRasterizationSettings,
+#     GaussianRasterizer,
+# )
+import diff_gaussian_rasterization_c7 
 from scene.cameras import Camera as GSCamera
-from gaussian_renderer import render, GaussianModel
+# from gaussian_renderer import render, GaussianModel
 from utils.system_utils import searchForMaxIteration
 from utils.graphics_utils import focal2fov
 
 
-def initialize_resterize(
+# def initialize_resterize(
+#     viewpoint_camera,
+#     pc: GaussianModel,
+#     pipe,
+#     bg_color: torch.Tensor,
+#     scaling_modifier=1.0,
+# ):
+#     # Set up rasterization configuration
+#     tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
+#     tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
+
+#     raster_settings = GaussianRasterizationSettings(
+#         image_height=int(viewpoint_camera.image_height),
+#         image_width=int(viewpoint_camera.image_width),
+#         tanfovx=tanfovx,
+#         tanfovy=tanfovy,
+#         bg=bg_color,
+#         scale_modifier=scaling_modifier,
+#         viewmatrix=viewpoint_camera.world_view_transform,
+#         projmatrix=viewpoint_camera.full_proj_transform,
+#         sh_degree=pc.active_sh_degree,
+#         campos=viewpoint_camera.camera_center,
+#         prefiltered=False,
+#         debug=pipe.debug,
+#     )
+
+#     rasterize = GaussianRasterizer(raster_settings=raster_settings)
+#     return rasterize
+
+def initialize_resterizer_3dgsdr(
     viewpoint_camera,
     pc: GaussianModel,
     pipe,
@@ -37,23 +68,29 @@ def initialize_resterize(
     tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
     tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
 
-    raster_settings = GaussianRasterizationSettings(
-        image_height=int(viewpoint_camera.image_height),
-        image_width=int(viewpoint_camera.image_width),
-        tanfovx=tanfovx,
-        tanfovy=tanfovy,
-        bg=bg_color,
-        scale_modifier=scaling_modifier,
-        viewmatrix=viewpoint_camera.world_view_transform,
-        projmatrix=viewpoint_camera.full_proj_transform,
-        sh_degree=pc.active_sh_degree,
-        campos=viewpoint_camera.camera_center,
-        prefiltered=False,
-        debug=pipe.debug,
-    )
+    imH = int(viewpoint_camera.image_height)
+    imW = int(viewpoint_camera.image_width)
 
-    rasterize = GaussianRasterizer(raster_settings=raster_settings)
-    return rasterize
+    def get_setting(Setting):
+        raster_settings = Setting(
+            image_height=imH,
+            image_width=imW,
+            tanfovx=tanfovx,
+            tanfovy=tanfovy,
+            scale_modifier=scaling_modifier,
+            viewmatrix=viewpoint_camera.world_view_transform,
+            projmatrix=viewpoint_camera.full_proj_transform,
+            sh_degree=pc.active_sh_degree,
+            campos=viewpoint_camera.camera_center,
+            prefiltered=False,
+            debug=pipe.debug
+        )
+        return raster_settings
+    
+    Setting_c7 = diff_gaussian_rasterization_c7.GaussianRasterizationSettings
+    rasterizer_c7 = diff_gaussian_rasterization_c7.GaussianRasterizer(get_setting(Setting_c7))
+
+    return rasterizer_c7
 
 
 def load_params_from_gs(
@@ -98,6 +135,8 @@ def load_params_from_gs(
     # # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # # They will be excluded from value updates used in the splitting criteria.
 
+    refl = pc.get_refl
+
     return {
         "pos": means3D,
         "screen_points": means2D,
@@ -107,6 +146,7 @@ def load_params_from_gs(
         "scales": scales,
         "rotations": rotations,
         "cov3D_precomp": cov3D_precomp,
+        "refl": refl,
     }
 
 

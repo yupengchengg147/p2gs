@@ -31,7 +31,8 @@ def densify_grids(
     grid: ti.template(),
     grid_density: ti.template(),
     grid_dx: float,
-):
+):  
+    #loop over all initial particles and compute the density of each grid in parallel
     for pi in range(init_particles.shape[0]):
         pos = init_particles[pi]
         x = pos[0]
@@ -66,6 +67,7 @@ def densify_grids(
             r = ti.max(r, sig[idx])
 
         r = ti.ceil(r / grid_dx, dtype=int)
+        # r indicates the radius of each gaussian kernel
         for dx in range(-r, r + 1):
             for dy in range(-r, r + 1):
                 for dz in range(-r, r + 1):
@@ -76,7 +78,8 @@ def densify_grids(
                         and j + dy < grid_density.shape[1]
                         and k + dz >= 0
                         and k + dz < grid_density.shape[2]
-                    ):
+                    ):  
+                        #eq 11
                         density = compute_density(
                             ti.Vector([i + dx, j + dy, k + dz]),
                             pos,
@@ -206,7 +209,7 @@ def internal_filling(
                         dir_type=dir_type,
                         size=grid.shape[0],
                         threshold=threshold,
-                    )
+                    ) #condition1
                     collision_hit = collision_hit and hit_test
 
             if collision_hit:
@@ -217,7 +220,7 @@ def internal_filling(
                     dir_type=ray_cast_dir,
                     size=grid.shape[0],
                     threshold=threshold,
-                )
+                ) #condition2
 
                 if ti.math.mod(hit_times, 2) == 1:
                     diff = max_particles_per_cell - grid[i, j, k]
@@ -302,6 +305,7 @@ def fill_particles(
     ray_cast_dir=4,
     boundary: list = None,
     smooth: bool = False,
+    # debug: bool = False,
 ):
     pos_clone = pos.clone()
     if boundary is not None:
@@ -334,9 +338,14 @@ def fill_particles(
     fill_num = 0
 
     # compute density_field
+    # here we loop over all initial particles and compute `grid <ti.field, (n,n,n), int>` and `grid_density <ti.field, (n,n,n). float>`
+    # specifically, we know how many particles each grid cover and the grid opacity computed from eq11   
     densify_grids(ti_pos, ti_opacity, ti_cov, grid, grid_density, grid_dx)
 
+
     # fill dense grids
+    # here we loop over all grids and fill the grids 
+    # whose density is larger than some threshold and the number of particles in the grid is less than max_particles_per_cell
     fill_num = fill_dense_grids(
         grid,
         grid_density,
@@ -375,8 +384,10 @@ def fill_particles(
     particles_tensor = particles.to_torch()[:fill_num].cuda()
     if boundary is not None:
         particles_tensor = particles_tensor + new_origin
+    # particles_filled = particles_tensor
+    # if debug:
+    #     return particles_tensor, particles_filled
     particles_tensor = torch.cat([pos_clone, particles_tensor], dim=0)
-
     return particles_tensor
 
 

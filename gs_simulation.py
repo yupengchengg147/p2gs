@@ -2,6 +2,7 @@ import sys
 
 sys.path.append("gaussian-splatting")
 
+
 import argparse
 import math
 import cv2
@@ -13,15 +14,20 @@ from tqdm import tqdm
 
 # Gaussian splatting dependencies
 from utils.sh_utils import eval_sh
-from scene.gaussian_model import GaussianModel
-from diff_gaussian_rasterization import (
-    GaussianRasterizationSettings,
-    GaussianRasterizer,
-)
+
+from scene.gaussian_model_3dgsdr import GaussianModel
+# import diff_gaussian_rasterization_c7 
+
+# from diff_gaussian_rasterization import (
+#     GaussianRasterizationSettings,
+#     GaussianRasterizer,
+# )
+
 from scene.cameras import Camera as GSCamera
-from gaussian_renderer import render, GaussianModel
+# from gaussian_renderer import render, GaussianModel
 from utils.system_utils import searchForMaxIteration
 from utils.graphics_utils import focal2fov
+from utils.general_utils import sample_camera_rays, get_env_rayd1, get_env_rayd2
 
 # MPM dependencies
 from mpm_solver_warp.engine_utils import *
@@ -57,6 +63,7 @@ def load_checkpoint(model_path, sh_degree=3, iteration=-1):
     checkpt_dir = os.path.join(model_path, "point_cloud")
     if iteration == -1:
         iteration = searchForMaxIteration(checkpt_dir)
+    print(f"Loading checkpoint from iteration {iteration}")
     checkpt_path = os.path.join(
         checkpt_dir, f"iteration_{iteration}", "point_cloud.ply"
     )
@@ -66,6 +73,59 @@ def load_checkpoint(model_path, sh_degree=3, iteration=-1):
     gaussians.load_ply(checkpt_path)
     return gaussians
 
+def get_normals_from_cov(pts,cov3d_tensor,cam_o):
+    p2o = cam_o[None] - pts
+    
+    cov3d_matrix = cov3d_tensor_to_matrix(cov3d_tensor)
+    rot_matrix, scales, _ = torch.svd(cov3d_matrix)
+
+    # print("rot_matrix 0", rot_matrix[1250])
+    # print("rot_matrix 0", rot_t[1250])
+    # print("rot_matrix det", torch.linalg.det(rot_matrix[12]))
+    # print("r*rt:", torch.matmul(rot_matrix[12], rot_matrix[12].T))
+    # assert torch.allclose(rot_matrix, rot_t, rtol=1e-2, atol=1e-2)
+
+    min_axis_id = torch.argmin(scales, dim = -1, keepdim=True)
+    min_axis = torch.zeros_like(scales).scatter(1, min_axis_id, 1)
+    
+    ndir = torch.bmm(rot_matrix, min_axis.unsqueeze(-1)).squeeze(-1)
+    neg_msk = torch.sum(p2o*ndir, dim=-1) < 0
+    ndir[neg_msk] = -ndir[neg_msk] # make sure normal orient to camera
+    return ndir
+
+
+def cov3d_tensor_to_matrix(cov3d_tensor):
+    cov3d_tensor = cov3d_tensor.view(-1, 6)
+    cov3d_matrix = torch.zeros((cov3d_tensor.shape[0], 3, 3), device=cov3d_tensor.device)
+    cov3d_matrix[:, 0, 0] = cov3d_tensor[:, 0]
+    cov3d_matrix[:, 0, 1] = cov3d_tensor[:, 1]
+    cov3d_matrix[:, 0, 2] = cov3d_tensor[:, 2]
+    cov3d_matrix[:, 1, 0] = cov3d_tensor[:, 1]
+    cov3d_matrix[:, 1, 1] = cov3d_tensor[:, 3]
+    cov3d_matrix[:, 1, 2] = cov3d_tensor[:, 4]
+    cov3d_matrix[:, 2, 0] = cov3d_tensor[:, 2]
+    cov3d_matrix[:, 2, 1] = cov3d_tensor[:, 4]
+    cov3d_matrix[:, 2, 2] = cov3d_tensor[:, 5]
+    return cov3d_matrix
+
+# rayd: x,3, from camera to world points
+# normal: x,3
+# all normalized
+def reflection(rayd, normal):
+    refl = rayd - 2*normal*torch.sum(rayd*normal, dim=-1, keepdim=True)
+    return refl
+
+def sample_cubemap_color(rays_d, env_map):
+    H,W = rays_d.shape[:2]
+    outcolor = torch.sigmoid(env_map(rays_d.reshape(-1,3)))
+    outcolor = outcolor.reshape(H,W,3).permute(2,0,1)
+    return outcolor
+
+def get_refl_color(envmap: torch.Tensor, HWK, R, T, normal_map): #RT W2C
+    rays_d = sample_camera_rays(HWK, R, T)
+    rays_d = reflection(rays_d, normal_map)
+    #rays_d = rays_d.clamp(-1, 1) # avoid numerical error when arccos
+    return sample_cubemap_color(rays_d, envmap)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -118,6 +178,7 @@ if __name__ == "__main__":
     init_screen_points = params["screen_points"]
     init_opacity = params["opacity"]
     init_shs = params["shs"]
+    init_refl = params["refl"]
 
     # throw away low opacity kernels
     mask = init_opacity[:, 0] > preprocessing_params["opacity_threshold"]
@@ -126,6 +187,7 @@ if __name__ == "__main__":
     init_opacity = init_opacity[mask, :]
     init_screen_points = init_screen_points[mask, :]
     init_shs = init_shs[mask, :]
+    init_refl = init_refl[mask, :]
 
     # rorate and translate object
     if args.debug:
@@ -163,6 +225,8 @@ if __name__ == "__main__":
         unselected_cov = init_cov[~mask, :]
         unselected_opacity = init_opacity[~mask, :]
         unselected_shs = init_shs[~mask, :]
+
+        # normals = 
 
         rotated_pos = rotated_pos[mask, :]
         init_cov = init_cov[mask, :]
@@ -221,11 +285,11 @@ if __name__ == "__main__":
 
     if filling_params is not None and filling_params["visualize"] == True:
         shs, opacity, mpm_init_cov = init_filled_particles(
-            mpm_init_pos[:gs_num],
+            mpm_init_pos[:gs_num], # initial gs particles
             init_shs,
             init_cov,
             init_opacity,
-            mpm_init_pos[gs_num:],
+            mpm_init_pos[gs_num:], # filled particles
         )
         gs_num = mpm_init_pos.shape[0]
     else:
@@ -311,7 +375,11 @@ if __name__ == "__main__":
             delta_e=camera_params["delta_e"],
             delta_r=camera_params["delta_r"],
         )
-        rasterize = initialize_resterize(
+
+        # rasterize = initialize_resterize(
+        #     current_camera, gaussians, pipeline, background
+        # )
+        rasterize = initialize_resterizer_3dgsdr(
             current_camera, gaussians, pipeline, background
         )
 
@@ -333,7 +401,6 @@ if __name__ == "__main__":
             rot = mpm_solver.export_particle_R_to_torch()
             cov3D = cov3D.view(-1, 6)[:gs_num].to(device)
             rot = rot.view(-1, 3, 3)[:gs_num].to(device)
-
             pos = apply_inverse_rotations(
                 undotransform2origin(
                     undoshift2center111(pos), scale_origin, original_mean_pos
@@ -344,23 +411,50 @@ if __name__ == "__main__":
             cov3D = apply_inverse_cov_rotations(cov3D, rotation_matrices)
             opacity = opacity_render
             shs = shs_render
+        
             if preprocessing_params["sim_area"] is not None:
                 pos = torch.cat([pos, unselected_pos], dim=0)
                 cov3D = torch.cat([cov3D, unselected_cov], dim=0)
                 opacity = torch.cat([opacity_render, unselected_opacity], dim=0)
                 shs = torch.cat([shs_render, unselected_shs], dim=0)
+            
+            normals = get_normals_from_cov(pos, cov3D, current_camera.camera_center)
+            rgb_precomp = convert_SH(shs, current_camera, gaussians, pos, rot)
 
-            colors_precomp = convert_SH(shs, current_camera, gaussians, pos, rot)
-            rendering, raddi = rasterize(
-                means3D=pos,
-                means2D=init_screen_points,
-                shs=None,
-                colors_precomp=colors_precomp,
-                opacities=opacity,
-                scales=None,
-                rotations=None,
-                cov3D_precomp=cov3D,
-            )
+            colors_precomp = torch.cat([rgb_precomp, normals, init_refl], dim=-1)
+            # print("colors_precomp shape:", colors_precomp.shape)
+            
+            imH = int(current_camera.image_height)
+            imW = int(current_camera.image_width)
+            bg_const = background[:, None, None].cuda().expand(3, imH, imW)
+            bg_map = torch.cat([bg_const, torch.zeros(4,imH,imW, device='cuda')], dim=0)
+
+            out_ts, radii = rasterize(
+                means3D = pos,
+                means2D = init_screen_points,
+                shs = None,
+                colors_precomp = colors_precomp,
+                opacities = opacity,
+                scales = None,
+                rotations = None,
+                cov3D_precomp = cov3D,
+                bg_map = bg_map)
+            
+            base_color = out_ts[:3,...] # 3,H,W
+            refl_strength = out_ts[6:7,...] #
+            normal_map = out_ts[3:6,...] 
+
+            normal_map = normal_map.permute(1,2,0)
+            # normal_map = normal_map / (torch.norm(normal_map, dim=-1, keepdim=True)+1e-6)
+            refl_color = get_refl_color(gaussians.get_envmap, current_camera.HWK, current_camera.R, current_camera.T, normal_map)
+            
+            final_image = (1-refl_strength) * base_color + refl_strength * refl_color
+                            
+
+            # rendering = normal_map.permute(2,0,1)
+            # rendering = normal_map
+            rendering = final_image
+
             cv2_img = rendering.permute(1, 2, 0).detach().cpu().numpy()
             cv2_img = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2RGB)
             if height is None or width is None:

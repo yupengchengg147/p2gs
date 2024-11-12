@@ -170,6 +170,12 @@ def get_camera_view(
         fovx = focal2fov(raw_camera["fx"], width)
         fovy = focal2fov(raw_camera["fy"], height)
 
+        K = np.array([
+            [raw_camera["fx"], 0, width / 2],
+            [0, raw_camera["fy"], height / 2],
+            [0, 0, 1],
+        ])
+
         return GSCamera(
             colmap_id=0,
             R=R,
@@ -180,4 +186,5 @@ def get_camera_view(
             gt_alpha_mask=None,
             image_name="fake",
             uid=0,
+            K=K,
         )

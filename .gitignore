@@ -1,9 +1,13 @@
 data
 .vscode
 output
+output_3dgsdr
+ply_debug
 *.ply
 *.pyc
 *.png
 *.jpg
 model
+model_3dgsdr
 log
+*.ipynb
